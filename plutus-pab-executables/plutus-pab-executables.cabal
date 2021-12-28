@@ -63,6 +63,7 @@ library plutus-pab-psgenerator
         , playground-common
         , plutus-contract
         , plutus-pab
+        , plutus-pab-schema
 
     build-depends:
         base >=4.7 && <5,
@@ -153,6 +154,7 @@ executable plutus-pab-examples
         , plutus-ledger
         , plutus-ledger-constraints
         , plutus-pab
+        , plutus-pab-schema
         , plutus-pab-psgenerator
         , plutus-use-cases
         , prettyprinter
@@ -234,6 +236,8 @@ executable plutus-pab-local-cluster
         , sqlite-simple
         , freer-extras
         , beam-migrate
+        , plutus-pab-schema
+        , plutus-use-cases
         , cardano-wallet
         , cardano-wallet-cli
         , cardano-wallet-launcher
@@ -290,6 +294,7 @@ executable plutus-pab-test-psgenerator
         mtl -any,
         plutus-contract -any,
         plutus-pab,
+        plutus-pab-schema,
         plutus-pab-psgenerator -any,
         plutus-use-cases -any,
         plutus-ledger -any,
@@ -350,6 +355,7 @@ test-suite plutus-pab-test-full
         plutus-chain-index-core -any,
         plutus-contract -any,
         plutus-pab,
+        plutus-pab-schema,
         plutus-pab-psgenerator,
         plutus-use-cases -any,
         plutus-ledger -any,
@@ -415,6 +421,7 @@ test-suite plutus-pab-test-full-long-running
         plutus-contract -any,
         plutus-chain-index-core -any,
         plutus-pab,
+        plutus-pab-schema,
         plutus-pab-psgenerator -any,
         plutus-use-cases -any,
         plutus-ledger -any,
@@ -506,6 +513,7 @@ executable plutus-pab-nami-demo
     plutus-chain-index -any,
     plutus-contract -any,
     plutus-pab -any,
+    plutus-pab-schema -any,
     plutus-pab-psgenerator -any,
     playground-common -any,
     prettyprinter -any,
