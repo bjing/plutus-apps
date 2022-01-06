@@ -7,6 +7,7 @@
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE TypeOperators         #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
@@ -14,8 +15,10 @@
 module Plutus.PAB.Webserver.Server
     ( startServer
     , startServer'
+    , startServerWithExtra
     , startServerDebug
     , startServerDebug'
+    , startServerDebugWithExtra
     ) where
 
 import Cardano.Wallet.Mock.Types (WalletInfo (WalletInfo, wiPaymentPubKeyHash, wiWallet))
@@ -48,7 +51,7 @@ import Plutus.PAB.Types (PABError, WebserverConfig (WebserverConfig, endpointTim
 import Plutus.PAB.Webserver.API (API, SwaggerAPI, WSAPI, WalletProxy)
 import Plutus.PAB.Webserver.Handler (apiHandler, swagger, walletProxy, walletProxyClientEnv)
 import Plutus.PAB.Webserver.WebSocket qualified as WS
-import Servant (Application, Handler (Handler), Raw, ServerT, err500, errBody, hoistServer, serve,
+import Servant (Application, Handler (Handler), Raw, ServerT, emptyServer, err500, errBody, hoistServer, serve,
                 serveDirectoryFileServer, (:<|>) ((:<|>)))
 import Servant qualified
 import Servant.Client (BaseUrl (baseUrlPort), ClientEnv)
@@ -59,45 +62,48 @@ asHandler PABRunner{runPABAction} = Servant.Handler . ExceptT . fmap (first mapE
     mapError :: PABError -> Servant.ServerError
     mapError e = Servant.err500 { Servant.errBody = LBS.pack $ show e }
 
-type CombinedAPI t = BaseCombinedAPI t :<|> SwaggerAPI
+type CombinedAPI t extraApi = BaseCombinedAPI t :<|> extraApi :<|> SwaggerAPI
 
 type BaseCombinedAPI t =
     API (Contract.ContractDef t) WalletId
     :<|> WSAPI
 
-app ::
-    forall t env.
+appWith ::
+    forall t env extraApi.
     ( FromJSON (Contract.ContractDef t)
     , ToJSON (Contract.ContractDef t)
     , Contract.PABContract t
     , Servant.MimeUnrender Servant.JSON (Contract.ContractDef t)
     , OpenApi.ToSchema (Contract.ContractDef t)
+    , Servant.HasServer extraApi '[]
     ) =>
-    Maybe FilePath
+    Servant.Server extraApi
+    -> Proxy extraApi
+    -> Maybe FilePath
     -> Either (Maybe ClientEnv) (PABAction t env WalletInfo) -- ^ wallet client (if wallet proxy is enabled)
     -> PABRunner t env
     -> Application
-app fp walletClient pabRunner = do
-    let apiServer :: ServerT (CombinedAPI t) Handler
+appWith extraServer _ fp walletClient pabRunner = do
+    let apiServer :: ServerT (CombinedAPI t extraApi) Handler
         apiServer =
             Servant.hoistServer
                 (Proxy @(BaseCombinedAPI t))
                 (asHandler pabRunner)
-                (apiHandler :<|> WS.wsHandler) :<|> (swagger @t)
+                (apiHandler :<|> WS.wsHandler) :<|> extraServer :<|> (swagger @t)
 
     case fp of
         Nothing -> do
             let wpM = either (fmap walletProxyClientEnv) (Just . walletProxy) walletClient
             case wpM of
                 Nothing -> do
-                    Servant.serve (Proxy @(CombinedAPI t)) apiServer
+                    Servant.serve (Proxy @(CombinedAPI t extraApi)) apiServer
                 Just wp -> do
                     let wpServer =
                             Servant.hoistServer
                                 (Proxy @(WalletProxy WalletId))
                                 (asHandler pabRunner)
                                 wp
-                        rest = Proxy @(CombinedAPI t :<|> WalletProxy WalletId)
+                        rest = Proxy @(CombinedAPI t extraApi :<|> WalletProxy WalletId)
                     Servant.serve rest (apiServer :<|> wpServer)
         Just filePath -> do
             let
@@ -105,14 +111,14 @@ app fp walletClient pabRunner = do
                 fileServer = serveDirectoryFileServer filePath
             case either (fmap walletProxyClientEnv) (Just . walletProxy) walletClient of
                 Nothing -> do
-                    Servant.serve (Proxy @(CombinedAPI t :<|> Raw)) (apiServer :<|> fileServer)
+                    Servant.serve (Proxy @(CombinedAPI t extraApi :<|> Raw)) (apiServer :<|> fileServer)
                 Just wp -> do
                     let wpServer =
                             Servant.hoistServer
                                 (Proxy @(WalletProxy WalletId))
                                 (asHandler pabRunner)
                                 wp
-                        rest = Proxy @(CombinedAPI t :<|> WalletProxy WalletId :<|> Raw)
+                        rest = Proxy @(CombinedAPI t extraApi :<|> WalletProxy WalletId :<|> Raw)
                     Servant.serve rest (apiServer :<|> wpServer :<|> fileServer)
 
 -- | Start the server using the config. Returns an action that shuts it down
@@ -131,10 +137,31 @@ startServer ::
     -- ^ How to generate a new wallet, either by proxying the request to the wallet API, or by running the PAB action
     -> Availability
     -> PABAction t env (MVar (), PABAction t env ())
-startServer WebserverConfig{baseUrl, staticDir, permissiveCorsPolicy, endpointTimeout} walletClient availability = do
+startServer = startServer' emptyServer (Proxy @Servant.EmptyAPI)
+
+-- | Start the server with extra api using the config. Returns an action that shuts it down
+--   again, and an MVar that is filled when the webserver
+--   thread exits.
+startServer' ::
+    forall t env extraApi.
+    ( FromJSON (Contract.ContractDef t)
+    , ToJSON (Contract.ContractDef t)
+    , Contract.PABContract t
+    , Servant.MimeUnrender Servant.JSON (Contract.ContractDef t)
+    , OpenApi.ToSchema (Contract.ContractDef t)
+    , Servant.HasServer extraApi '[]
+    )
+    => Servant.Server extraApi -- ^ 'extraApi' server
+    -> Proxy extraApi -- ^ Proxy with extraApi
+    -> WebserverConfig -- ^ Optional file path for static assets
+    -> Either (Maybe ClientEnv) (PABAction t env WalletInfo)
+    -- ^ How to generate a new wallet, either by proxying the request to the wallet API, or by running the PAB action
+    -> Availability
+    -> PABAction t env (MVar (), PABAction t env ())
+startServer' extraServer extraServerProxy WebserverConfig{baseUrl, staticDir, permissiveCorsPolicy, endpointTimeout} walletClient availability = do
     when permissiveCorsPolicy $
       logWarn @(LM.PABMultiAgentMsg t) (LM.UserLog "Warning: Using a very permissive CORS policy! *Any* website serving JavaScript can interact with these endpoints.")
-    startServer' middlewares (baseUrlPort baseUrl) walletClient staticDir availability (timeout endpointTimeout)
+    startServerWithExtra extraServer extraServerProxy middlewares (baseUrlPort baseUrl) walletClient staticDir availability (timeout endpointTimeout)
       where
         middlewares = if permissiveCorsPolicy then corsMiddlewares else []
         corsMiddlewares =
@@ -150,25 +177,28 @@ startServer WebserverConfig{baseUrl, staticDir, permissiveCorsPolicy, endpointTi
         timeout Nothing  = 30
         timeout (Just s) = fromIntegral $ max s 30
 
--- | Start the server. Returns an action that shuts it down
+-- | Start the server with extra api. Returns an action that shuts it down
 --   again, and an MVar that is filled when the webserver
 --   thread exits.
-startServer' ::
-    forall t env.
+startServerWithExtra ::
+    forall t env extraApi.
     ( FromJSON (Contract.ContractDef t)
     , ToJSON (Contract.ContractDef t)
     , Contract.PABContract t
     , Servant.MimeUnrender Servant.JSON (Contract.ContractDef t)
     , OpenApi.ToSchema (Contract.ContractDef t)
+    , Servant.HasServer extraApi '[]
     )
-    => [Middleware] -- ^ Optional wai middleware
+    => Servant.Server extraApi -- ^ 'extraApi' server
+    -> Proxy extraApi -- ^ Proxy with extraApi
+    -> [Middleware] -- ^ Optional wai middleware
     -> Int -- ^ Port
     -> Either (Maybe ClientEnv) (PABAction t env WalletInfo) -- ^ How to generate a new wallet, either by proxying the request to the wallet API, or by running the PAB action
     -> Maybe FilePath -- ^ Optional file path for static assets
     -> Availability
     -> Int
     -> PABAction t env (MVar (), PABAction t env ())
-startServer' waiMiddlewares port walletClient staticPath availability timeout = do
+startServerWithExtra extraServer extraServerProxy waiMiddlewares port walletClient staticPath availability timeout = do
     simRunner <- Core.pabRunner
     shutdownVar <- liftIO $ STM.atomically $ STM.newEmptyTMVar @()
     mvar <- liftIO newEmptyMVar
@@ -190,7 +220,7 @@ startServer' waiMiddlewares port walletClient staticPath availability timeout = 
     void $ liftIO $
         forkFinally
             (Warp.runSettings warpSettings $ middleware
-               $ app staticPath walletClient simRunner)
+               $ appWith extraServer extraServerProxy staticPath walletClient simRunner)
             (\_ -> putMVar mvar ())
 
     pure (mvar, liftIO $ STM.atomically $ STM.putTMVar shutdownVar ())
@@ -223,3 +253,22 @@ startServerDebug' conf = do
             (wllt, pk) <- Simulator.addWallet
             pure $ WalletInfo{wiWallet = wllt, wiPaymentPubKeyHash = pk}
     snd <$> startServer conf (Right mkWalletInfo) tk
+
+-- | Start the server using a default configuration for debugging.
+startServerDebugWithExtra ::
+    ( FromJSON (Contract.ContractDef t)
+    , ToJSON (Contract.ContractDef t)
+    , Contract.PABContract t
+    , Servant.MimeUnrender Servant.JSON (Contract.ContractDef t)
+    , OpenApi.ToSchema (Contract.ContractDef t)
+    , Servant.HasServer extraApi '[]
+    )
+    => Servant.Server extraApi -- ^ 'extraApi' server
+    -> Proxy extraApi -- ^ Proxy with extraApi
+    -> Simulation t (Simulation t ())
+startServerDebugWithExtra extraServer extraServerProxy = do
+    tk <- newToken
+    let mkWalletInfo = do
+            (wllt, pk) <- Simulator.addWallet
+            pure $ WalletInfo{wiWallet = wllt, wiPaymentPubKeyHash = pk}
+    snd <$> startServer' extraServer extraServerProxy defaultWebServerConfig (Right mkWalletInfo) tk
