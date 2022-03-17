@@ -26,6 +26,7 @@
 , less
 , lib
 , nix
+, numactl
 , openssh
 , procps
 , runtimeShell
@@ -95,6 +96,12 @@ let
       chmod +w lib64
       ln -s ${glibc}/lib64/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2
       ln -s ${gcc-unwrapped.lib}/lib64/libstdc++.so.6 lib64/libstdc++.so.6
+      ln -s ${glibc}/lib64/libnuma.so.1 lib64/libnuma.so.1
+      ln -s ${glibc}/lib64/libnuma.so.1 lib64/libnuma.so
+      ln -s ${glibc}/lib64/libnuma.a lib64/libnuma.a
+      ln -s ${glibc}/lib/libnuma.so.1 lib/libnuma.so.1
+      ln -s ${glibc}/lib/libnuma.so.1 lib/libnuma.so
+      ln -s ${glibc}/lib/libnuma.a lib/libnuma.a
       chmod -w lib64
     '' + extraCommands;
 
